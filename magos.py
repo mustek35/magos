@@ -721,6 +721,10 @@ class MainWindow(QMainWindow):
 
         # Tab 1: Detecciones en tiempo real
         detections_tab = self.create_detections_tab()
+        tab_widget.addTab(detections_tab, "Detecciones")
+
+        # Tab 2: Configuración de filtros
+        filters_tab = self.create_filters_tab()
         tab_widget.addTab(filters_tab, "Filtros")
 
         # Tab 3: Estadísticas
@@ -1338,8 +1342,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()detections_tab, "Detecciones")
-
-        # Tab 2: Configuración de filtros
-        filters_tab = self.create_filters_tab()
-        tab_widget.addTab(
+    main()
