@@ -4,8 +4,14 @@ import requests
 from datetime import datetime, timedelta
 import math
 import time
+import os
+import argparse
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
+from urllib.parse import urljoin
+
+# Debug flag controlled by environment variable or --debug argument
+DEBUG = os.environ.get("MAGOS_DEBUG") == "1"
 
 try:
     from PyQt6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, 
@@ -68,7 +74,7 @@ class RadarAPI:
     """Clase para manejar la comunicación con el radar MAGOS"""
     
     def __init__(self, base_url: str, username: str, password: str):
-        self.base_url = base_url
+        self.base_url = base_url.rstrip('/')
         self.username = username
         self.password = password
         self.token = None
@@ -78,19 +84,37 @@ class RadarAPI:
         """Autentica con el radar y obtiene el token"""
         try:
             auth_url = f"{self.base_url}/api/auth/login"
+            if DEBUG:
+                print(f"DEBUG: Autenticando en {auth_url}")
             response = self.session.post(auth_url, json={
                 "username": self.username,
                 "password": self.password
             })
+
+            if DEBUG:
+                print(f"DEBUG: Código de respuesta {response.status_code}")
+                if response.headers.get('Content-Type', '').startswith('application/json'):
+                    try:
+                        print(f"DEBUG: Respuesta {response.json()}")
+                    except Exception:
+                        pass
+                else:
+                    print(f"DEBUG: Texto de respuesta {response.text[:200]}")
             
             if response.status_code == 200:
                 data = response.json()
                 self.token = data.get('token')
+                if DEBUG:
+                    print(f"DEBUG: Token obtenido {self.token}")
                 self.session.headers.update({'Authorization': f'Bearer {self.token}'})
                 return True
             return False
         except Exception as e:
-            print(f"Error de autenticación: {e}")
+            msg = f"Error de autenticación: {e}"
+            if DEBUG:
+                print(f"DEBUG: {msg}")
+            else:
+                print(msg)
             return False
     
     def get_detections(self, start_time: datetime = None, end_time: datetime = None) -> List[Detection]:
@@ -114,7 +138,11 @@ class RadarAPI:
                 'AuthPass': self.password
             }
             
+            if DEBUG:
+                print(f"DEBUG: Solicitando detecciones en {url} con {params}")
             response = self.session.get(url, params=params)
+            if DEBUG:
+                print(f"DEBUG: Código de respuesta {response.status_code}")
             
             if response.status_code == 200:
                 data = response.json()
@@ -509,6 +537,7 @@ class MainWindow(QMainWindow):
         try:
             self.web_view = RadarWebView()
             layout.addWidget(self.web_view)
+            self.web_view.loadFinished.connect(self.handle_web_load_finished)
         except Exception as e:
             # Si WebEngine no está disponible, mostrar un placeholder
             placeholder = QLabel("Vista Web no disponible\n(PyQt6-WebEngine no instalado)")
@@ -737,6 +766,11 @@ class MainWindow(QMainWindow):
         url = self.url_edit.text()
         username = self.username_edit.text()
         password = self.password_edit.text()
+
+        if DEBUG:
+            msg = f"Conectando a {url} como {username}"
+            print(f"DEBUG: {msg}")
+            self.log_event(msg)
         
         if not all([url, username, password]):
             QMessageBox.warning(self, "Error", "Por favor, complete todos los campos de conexión.")
@@ -764,37 +798,65 @@ class MainWindow(QMainWindow):
                 self.session_start_label.setText(self.session_start_time.strftime('%Y-%m-%d %H:%M:%S'))
                 
             else:
-                QMessageBox.critical(self, "Error de Conexión", 
+                QMessageBox.critical(self, "Error de Conexión",
                                    "No se pudo autenticar con el radar. Verifique las credenciales.")
+                if DEBUG:
+                    print("DEBUG: Autenticación fallida")
+                    self.log_event("Autenticación fallida")
                 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error de conexión: {str(e)}")
+            if DEBUG:
+                print(f"DEBUG: Error de conexión: {e}")
+                self.log_event(f"Error de conexión: {e}")
     
     def disconnect_from_radar(self):
         """Desconecta del radar"""
+        if DEBUG:
+            print("DEBUG: Desconectando del radar")
+
         if self.data_thread:
             self.data_thread.stop()
             self.data_thread = None
-        
+
         self.radar_api = None
         self.connection_status.setStyleSheet("color: red; font-size: 16px;")
         self.statusBar().showMessage("Desconectado del radar")
-        
+
         self.connect_btn.setEnabled(True)
         self.disconnect_btn.setEnabled(False)
-        
+
         self.log_event("Desconectado del radar MAGOS")
     
     def load_web_view(self):
         """Carga la vista web del radar"""
         if self.radar_api and self.web_view:
-            web_url = f"{self.radar_api.base_url}/webclient"
+            # La autenticación para la interfaz web se realiza mediante un token
+            # obtenido al conectarse al radar. Construimos la URL de forma
+            # robusta para evitar problemas con barras al final.
+            web_base = urljoin(self.radar_api.base_url + '/', 'webclient')
+            web_url = f"{web_base}?token={self.radar_api.token}"
+            if DEBUG:
+                debug_msg = f"Cargando URL web: {web_url}"
+                print(f"DEBUG: {debug_msg}")
+                self.log_event(debug_msg)
             self.web_view.setUrl(QUrl(web_url))
     
     def reload_web_view(self):
         """Recarga la vista web"""
         if self.web_view:
             self.web_view.reload()
+
+    def handle_web_load_finished(self, ok: bool):
+        """Señal al terminar la carga de la web"""
+        if DEBUG:
+            msg = (
+                "Interfaz web cargada correctamente"
+                if ok
+                else "Error al cargar la interfaz web"
+            )
+            print(f"DEBUG: {msg}")
+            self.log_event(msg)
     
     def start_data_collection(self):
         """Inicia la recolección de datos"""
@@ -1041,7 +1103,22 @@ class ExportManager:
 
 def main():
     """Función principal"""
-    app = QApplication(sys.argv)
+    parser = argparse.ArgumentParser(description="MAGOS Radar Application")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Mostrar mensajes de depuración",
+    )
+    args, qt_args = parser.parse_known_args()
+
+    # Qt requiere que la lista de argumentos incluya el nombre del programa
+    qt_args = sys.argv[:1] + qt_args
+
+    global DEBUG
+    if args.debug:
+        DEBUG = True
+
+    app = QApplication(qt_args)
     
     # Configurar estilo de la aplicación
     app.setStyle('Fusion')

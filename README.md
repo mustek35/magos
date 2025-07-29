@@ -34,3 +34,4 @@ The resulting standalone executable will be located in the `dist/` folder.
    A sample Inno Setup script (`magos.iss`) is included.
    Open it with the Inno Setup Compiler and click **Compile** to generate `MAGOS-Setup.exe`.
 
+
