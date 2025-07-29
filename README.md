@@ -1,8 +1,6 @@
 # MAGOS Radar Application
 
-This project contains a PyQt-based GUI for interacting with the MAGOS radar.
-The application embeds the radar's web interface so you can log in with your
-username and password directly inside the program.
+
 
 ## Requirements
 
@@ -36,18 +34,4 @@ The resulting standalone executable will be located in the `dist/` folder.
    A sample Inno Setup script (`magos.iss`) is included.
    Open it with the Inno Setup Compiler and click **Compile** to generate `MAGOS-Setup.exe`.
 
-## Debugging Web Access
-
-To troubleshoot issues accessing the embedded web interface, enable debug
-messages by setting the environment variable `MAGOS_DEBUG=1` or passing the
-`--debug` option when launching the application:
-
-```bash
-MAGOS_DEBUG=1 python magos.py
-# or
-python magos.py --debug
-```
-
-With debug mode enabled the console and the log panel will show the
-authentication response and the exact URL loaded in the web view.
 
