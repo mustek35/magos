@@ -839,7 +839,9 @@ class MainWindow(QMainWindow):
             # La autenticación para la interfaz web se realiza mediante un token
             # obtenido al conectarse al radar. Construimos la URL de forma
             # robusta para evitar problemas con barras al final.
-            web_base = urljoin(self.radar_api.base_url + '/', 'webclient')
+            # Usamos trailing slash para prevenir errores "Cannot GET /webclient"
+            # en algunos servidores que esperan la ruta con '/' al final.
+            web_base = urljoin(self.radar_api.base_url + '/', 'webclient/')
             web_url = f"{web_base}?token={self.radar_api.token}"
 
             if DEBUG:
