@@ -788,7 +788,11 @@ class MainWindow(QMainWindow):
     def load_web_view(self):
         """Carga la vista web del radar"""
         if self.radar_api and self.web_view:
-            web_url = f"{self.radar_api.base_url}/webclient"
+            # La autenticación para la interfaz web se realiza mediante un token
+            # obtenido al conectarse al radar. Adjuntamos el token como
+            # parámetro para que el usuario ingrese automáticamente.
+            web_url = (f"{self.radar_api.base_url}/webclient"
+                       f"?token={self.radar_api.token}")
             self.web_view.setUrl(QUrl(web_url))
     
     def reload_web_view(self):

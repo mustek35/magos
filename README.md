@@ -1,6 +1,9 @@
 # MAGOS Radar Application
 
 This project contains a PyQt-based GUI for interacting with the MAGOS radar.
+Authentication to the web interface is performed via a token obtained from the
+radar's API, allowing the embedded browser to open without asking for
+credentials.
 
 ## Requirements
 
