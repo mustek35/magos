@@ -873,18 +873,13 @@ class MainWindow(QMainWindow):
             web_base = urljoin(self.radar_api.base_url + '/', 'webclient/')
             web_url = f"{web_base}?token={self.radar_api.token}"
 
+
             if DEBUG:
                 debug_msg = f"Cargando URL web: {web_url}"
                 print(f"DEBUG: {debug_msg}")
                 self.log_event(debug_msg)
             self.web_view.setUrl(QUrl(web_url))
 
-            # Intentar descargar la página completa para debug / scraping
-            html = self.radar_api.fetch_webclient_html()
-            if html is not None and DEBUG:
-                snippet = html.replace("\n", " ")[:200]
-                print(f"DEBUG: HTML descargado: {snippet}")
-                self.log_event(f"HTML descargado: {snippet}")
     
     def reload_web_view(self):
         """Recarga la vista web"""
@@ -902,7 +897,8 @@ class MainWindow(QMainWindow):
             print(f"DEBUG: {msg}")
             self.log_event(msg)
 
-            if self.web_view:
+            if ok and self.web_view:
+
                 def _log_html(html: str):
                     snippet = html.replace("\n", " ")[:200]
                     print(f"DEBUG: HTML inicial: {snippet}")
