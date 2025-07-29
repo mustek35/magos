@@ -545,7 +545,11 @@ class MainWindow(QMainWindow):
             layout.addWidget(placeholder)
             self.web_view = None
         
-        # Botón para recargar
+        # Botones para cargar y recargar
+
+        load_btn = QPushButton("Cargar Página")
+        load_btn.clicked.connect(self.load_web_view)
+        layout.addWidget(load_btn)
 
         reload_btn = QPushButton("Recargar Vista Web")
         reload_btn.clicked.connect(self.reload_web_view)
@@ -859,6 +863,13 @@ class MainWindow(QMainWindow):
             )
             print(f"DEBUG: {msg}")
             self.log_event(msg)
+            if ok and self.web_view:
+                def _log_html(html: str):
+                    snippet = html.replace("\n", " ")[:200]
+                    print(f"DEBUG: HTML inicial: {snippet}")
+                    self.log_event(f"HTML inicial: {snippet}")
+
+                self.web_view.page().toHtml(_log_html)
     
     def start_data_collection(self):
         """Inicia la recolección de datos"""
