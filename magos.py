@@ -8,7 +8,9 @@ import os
 import argparse
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, urlunparse
+
+from websocket_client import WebSocketRadarClient
 
 # Debug flag controlled by environment variable or --debug argument
 DEBUG = os.environ.get("MAGOS_DEBUG") == "1"
@@ -461,6 +463,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.radar_api = None
         self.data_thread = None
+        self.ws_client = None
         self.false_positive_filter = FalsePositiveFilter()
         self.all_detections = []
         self.session_start_time = None
@@ -824,6 +827,29 @@ class MainWindow(QMainWindow):
                 
                 # Iniciar recolección de datos
                 self.start_data_collection()
+
+                # Conexión WebSocket
+                login_url = urljoin(url.rstrip('/') + '/', 'auth')
+
+                parsed = urlparse(url)
+                scheme = 'wss' if parsed.scheme == 'https' else 'ws'
+                ws_base = urlunparse(parsed._replace(scheme=scheme))
+                ws_url = urljoin(ws_base + '/', 'socket.io/?EIO=4&transport=websocket')
+
+                self.ws_client = WebSocketRadarClient(
+                    login_url,
+                    ws_url,
+                    username,
+                    password,
+                    self.handle_ws_message,
+                )
+
+                try:
+                    self.ws_client.connect()
+                except Exception as ws_err:
+                    if DEBUG:
+                        print(f"DEBUG: Error WebSocket: {ws_err}")
+                    self.log_event(f"Error WebSocket: {ws_err}")
                 
                 # Log
                 self.log_event("Conectado exitosamente al radar MAGOS")
@@ -851,6 +877,10 @@ class MainWindow(QMainWindow):
         if self.data_thread:
             self.data_thread.stop()
             self.data_thread = None
+
+        if self.ws_client:
+            self.ws_client.close()
+            self.ws_client = None
 
         self.radar_api = None
         self.connection_status.setStyleSheet("color: red; font-size: 16px;")
@@ -964,6 +994,12 @@ class MainWindow(QMainWindow):
             self.connection_status.setStyleSheet("color: green; font-size: 16px;")
         else:
             self.connection_status.setStyleSheet("color: orange; font-size: 16px;")
+
+    def handle_ws_message(self, message: str):
+        """Procesa un mensaje recibido por WebSocket."""
+        if DEBUG:
+            print(f"DEBUG WS: {message}")
+        self.log_event(f"WS: {message}")
     
     def apply_filter_settings(self):
         """Aplica la nueva configuración de filtros"""

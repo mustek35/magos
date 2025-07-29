@@ -6,17 +6,18 @@
 
 - Python 3.9+
 - `requests`
+- `websocket-client`
 - Either `PyQt6` and `PyQt6-WebEngine` or `PyQt5` and `PyQtWebEngine`
 - `pyinstaller` (for building the executable)
 - Optionally, [Inno Setup](https://jrsoftware.org/isinfo.php) to create a Windows installer
 
 Install dependencies with pip:
 ```bash
-pip install requests PyQt6 PyQt6-WebEngine pyinstaller
+pip install requests websocket-client PyQt6 PyQt6-WebEngine pyinstaller
 ```
 Or, for PyQt5:
 ```bash
-pip install PyQt5 PyQtWebEngine pyinstaller
+pip install requests websocket-client PyQt5 PyQtWebEngine pyinstaller
 ```
 
 ## Building a Stand-alone Executable
