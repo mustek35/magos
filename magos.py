@@ -93,22 +93,30 @@ class RadarAPI:
 
             if DEBUG:
                 print(f"DEBUG: Código de respuesta {response.status_code}")
-                if response.headers.get('Content-Type', '').startswith('application/json'):
-                    try:
-                        print(f"DEBUG: Respuesta {response.json()}")
-                    except Exception:
-                        pass
-                else:
+
+            data = None
+            if response.headers.get('Content-Type', '').startswith('application/json'):
+                try:
+                    data = response.json()
+                    if DEBUG:
+                        print(f"DEBUG: Respuesta {data}")
+                except Exception as e:
+                    if DEBUG:
+                        print(f"DEBUG: Error leyendo JSON: {e}")
+            else:
+                if DEBUG:
                     print(f"DEBUG: Texto de respuesta {response.text[:200]}")
-            
-            if response.status_code == 200:
-                data = response.json()
+
+            if response.status_code == 200 and data and 'token' in data:
                 self.token = data.get('token')
                 if DEBUG:
                     print(f"DEBUG: Token obtenido {self.token}")
                 self.session.headers.update({'Authorization': f'Bearer {self.token}'})
                 return True
-            return False
+            else:
+                if DEBUG:
+                    print("DEBUG: Autenticación no exitosa")
+                return False
         except Exception as e:
             msg = f"Error de autenticación: {e}"
             if DEBUG:
@@ -170,6 +178,27 @@ class RadarAPI:
         except Exception as e:
             print(f"Error obteniendo detecciones: {e}")
             return []
+
+    def fetch_webclient_html(self) -> Optional[str]:
+        """Descarga la interfaz web completa usando la sesión autenticada"""
+        if not self.token:
+            if DEBUG:
+                print("DEBUG: No hay token disponible para obtener la página")
+            return None
+
+        try:
+            web_url = urljoin(self.base_url + '/', 'webclient/')
+            if DEBUG:
+                print(f"DEBUG: Solicitando página web en {web_url}")
+            response = self.session.get(web_url, params={"token": self.token})
+            if DEBUG:
+                print(f"DEBUG: Código de respuesta {response.status_code}")
+            if response.status_code == 200:
+                return response.text
+        except Exception as e:
+            if DEBUG:
+                print(f"DEBUG: Error al obtener página: {e}")
+        return None
 
 class FalsePositiveFilter:
     """Filtro para eliminar falsos positivos"""
@@ -545,7 +574,11 @@ class MainWindow(QMainWindow):
             layout.addWidget(placeholder)
             self.web_view = None
         
-        # Botón para recargar
+        # Botones para cargar y recargar
+
+        load_btn = QPushButton("Cargar Página")
+        load_btn.clicked.connect(self.load_web_view)
+        layout.addWidget(load_btn)
 
         reload_btn = QPushButton("Recargar Vista Web")
         reload_btn.clicked.connect(self.reload_web_view)
@@ -835,7 +868,9 @@ class MainWindow(QMainWindow):
             # La autenticación para la interfaz web se realiza mediante un token
             # obtenido al conectarse al radar. Construimos la URL de forma
             # robusta para evitar problemas con barras al final.
-            web_base = urljoin(self.radar_api.base_url + '/', 'webclient')
+            # Usamos trailing slash para prevenir errores "Cannot GET /webclient"
+            # en algunos servidores que esperan la ruta con '/' al final.
+            web_base = urljoin(self.radar_api.base_url + '/', 'webclient/')
             web_url = f"{web_base}?token={self.radar_api.token}"
 
             if DEBUG:
@@ -843,6 +878,13 @@ class MainWindow(QMainWindow):
                 print(f"DEBUG: {debug_msg}")
                 self.log_event(debug_msg)
             self.web_view.setUrl(QUrl(web_url))
+
+            # Intentar descargar la página completa para debug / scraping
+            html = self.radar_api.fetch_webclient_html()
+            if html is not None and DEBUG:
+                snippet = html.replace("\n", " ")[:200]
+                print(f"DEBUG: HTML descargado: {snippet}")
+                self.log_event(f"HTML descargado: {snippet}")
     
     def reload_web_view(self):
         """Recarga la vista web"""
@@ -859,6 +901,14 @@ class MainWindow(QMainWindow):
             )
             print(f"DEBUG: {msg}")
             self.log_event(msg)
+
+            if self.web_view:
+                def _log_html(html: str):
+                    snippet = html.replace("\n", " ")[:200]
+                    print(f"DEBUG: HTML inicial: {snippet}")
+                    self.log_event(f"HTML inicial: {snippet}")
+
+                self.web_view.page().toHtml(_log_html)
     
     def start_data_collection(self):
         """Inicia la recolección de datos"""
