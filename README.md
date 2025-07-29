@@ -1,6 +1,6 @@
 # MAGOS Radar Application
 
-This project contains a PyQt-based GUI for interacting with the MAGOS radar.
+
 
 ## Requirements
 
