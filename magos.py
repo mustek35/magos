@@ -1,8 +1,12 @@
++241
+-106
+
 import sys
 import json
 import requests
 import math
 import time
+import datetime
 from datetime import datetime, timedelta
 from urllib.parse import urljoin
 import os
@@ -29,11 +33,12 @@ DEBUG = os.environ.get("MAGOS_DEBUG") == "1"
 
 try:
     from PyQt6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, 
-                                 QHBoxLayout, QWidget, QLineEdit, QPushButton, 
+                                 QHBoxLayout, QWidget, QLineEdit, QPushButton,
                                  QLabel, QTextEdit, QTableWidget, QTableWidgetItem,
                                  QTabWidget, QGroupBox, QFormLayout, QSpinBox,
                                  QDoubleSpinBox, QCheckBox, QComboBox, QProgressBar,
-                                 QSplitter, QMessageBox, QListWidget, QFrame)
+                                 QSplitter, QMessageBox, QListWidget, QFrame,
+                                 QToolButton)
     from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt, QUrl
     from PyQt6.QtWebEngineWidgets import QWebEngineView
     from PyQt6.QtGui import QFont, QPalette, QColor
@@ -42,11 +47,12 @@ except ImportError:
     print("PyQt6 no está instalado. Intentando con PyQt5...")
     try:
         from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, 
-                                     QHBoxLayout, QWidget, QLineEdit, QPushButton, 
+                                     QHBoxLayout, QWidget, QLineEdit, QPushButton,
                                      QLabel, QTextEdit, QTableWidget, QTableWidgetItem,
                                      QTabWidget, QGroupBox, QFormLayout, QSpinBox,
                                      QDoubleSpinBox, QCheckBox, QComboBox, QProgressBar,
-                                     QSplitter, QMessageBox, QListWidget, QFrame)
+                                     QSplitter, QMessageBox, QListWidget, QFrame,
+                                     QToolButton)
         from PyQt5.QtCore import QThread, pyqtSignal, QTimer, Qt, QUrl
         from PyQt5.QtWebEngineWidgets import QWebEngineView
         from PyQt5.QtGui import QFont, QPalette, QColor
@@ -58,6 +64,7 @@ except ImportError:
         print("o")
         print("pip install PyQt5 PyQt5-tools requests")
         sys.exit(1)
+
 
 @dataclass
 class Detection:
@@ -417,17 +424,27 @@ class DataCollectionThread:
         
         # Configurar callback para nuevas detecciones
         def detection_callback(detections):
-            if self.detections_received and hasattr(self.detections_received, 'emit'):
+            if not self.detections_received:
+                return
+
+            if hasattr(self.detections_received, 'emit'):
+                # Compatibilidad con señales PyQt
                 self.detections_received.emit(detections)
-        
+            elif callable(self.detections_received):
+                # Permitir pasar funciones normales
+                self.detections_received(detections)
+
         self.radar_api.set_detection_callback(detection_callback)
         
         # Obtener detecciones (esto inicia el WebSocket automáticamente)
         self.radar_api.get_detections()
         
         # Simular conexión exitosa
-        if self.connection_status and hasattr(self.connection_status, 'emit'):
-            self.connection_status.emit(True)
+        if self.connection_status:
+            if hasattr(self.connection_status, 'emit'):
+                self.connection_status.emit(True)
+            elif callable(self.connection_status):
+                self.connection_status(True)
         
         if DEBUG:
             print("🚀 DataCollectionThread iniciado con WebSocket")
@@ -453,10 +470,6 @@ class DetectionTableWidget(QTableWidget):
     
     def __init__(self):
         super().__init__()
-        self.setup_table()
-    
-    def setup_table(self):
-        headers = ['ID', 'Timestamp', 'X', 'Y', 'Velocidad', 'Rumbo', 'Confianza', 'Track ID', 'Estado']
         self.setColumnCount(len(headers))
         self.setHorizontalHeaderLabels(headers)
         self.setAlternatingRowColors(True)
@@ -483,8 +496,11 @@ class DetectionTableWidget(QTableWidget):
         ]
         
         for col, item in enumerate(items):
-            if detection.is_false_positive:
-                item.setBackground(QColor(255, 200, 200))  # Fondo rojizo
+            # Usar texto blanco para mejor contraste
+            item.setForeground(QColor("white"))
+            # Resaltar detecciones válidas con un fondo verdoso
+            if not detection.is_false_positive:
+                item.setBackground(QColor(0, 80, 0))
             self.setItem(row, col, item)
         
         # Hacer scroll al último elemento
@@ -496,9 +512,17 @@ class RadarVisualizationWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.detections = []
-        self.scale = 1.0
-        self.center_x = 0
-        self.center_y = 0
+        # Escala para convertir metros en píxeles (0.4 ≈ 1 px cada 2.5 m)
+        self.scale = 0.4
+        # Permite hacer zoom con la rueda del mouse
+        if PYQT_VERSION == 6:
+            self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        else:
+            self.setFocusPolicy(Qt.StrongFocus)
+        self.offset_x = 0
+        self.offset_y = 0
+        self.speed_alert_threshold = 5.0  # m/s
+        self.distance_alert_threshold = 5.0  # metros
         self.setMinimumSize(400, 400)
         
     def add_detection(self, detection: Detection):
@@ -508,6 +532,48 @@ class RadarVisualizationWidget(QWidget):
         if len(self.detections) > 100:
             self.detections = self.detections[-100:]
         self.update()
+
+    def pan(self, dx: int, dy: int):
+        """Desplaza la vista del radar"""
+        self.offset_x += dx
+        self.offset_y += dy
+        self.update()
+
+    def set_alert_thresholds(self, speed: float, distance: float):
+        """Actualiza los umbrales de velocidad y distancia para puntos sospechosos"""
+        self.speed_alert_threshold = speed
+        self.distance_alert_threshold = distance
+        self.update()
+
+    def wheelEvent(self, event):
+        """Permite hacer zoom con la rueda del mouse"""
+        delta = event.angleDelta().y()
+        if delta > 0:
+            self.scale *= 1.1
+        else:
+            self.scale /= 1.1
+        # Limitar la escala a un rango razonable
+        self.scale = max(0.1, min(self.scale, 2.0))
+        self.update()
+
+    def keyPressEvent(self, event):
+        """Permite desplazar la vista con las flechas del teclado"""
+        key = event.key()
+        step = 20
+        if key == Qt.Key_Left:
+            self.pan(-step, 0)
+        elif key == Qt.Key_Right:
+            self.pan(step, 0)
+        elif key == Qt.Key_Up:
+            self.pan(0, -step)
+        elif key == Qt.Key_Down:
+            self.pan(0, step)
+        else:
+            if PYQT_VERSION == 6:
+                super().keyPressEvent(event)
+            else:
+                super(RadarVisualizationWidget, self).keyPressEvent(event)
+    
     
     def paintEvent(self, event):
         """Dibuja la visualización del radar"""
@@ -527,21 +593,28 @@ class RadarVisualizationWidget(QWidget):
         painter.fillRect(self.rect(), QColor(20, 20, 40))
         
         # Centro del radar
-        center_x = self.width() // 2
-        center_y = self.height() // 2
+        center_x = self.width() // 2 + self.offset_x
+        center_y = self.height() // 2 + self.offset_y
         
         # Dibujar círculos concéntricos (rangos)
         painter.setPen(QPen(QColor(0, 100, 0), 1))
+        # Dibujar círculos concéntricos con mayor rango
+        # Cada círculo representa ~200 m cuando la escala es 0.4 px/m
         for i in range(1, 6):
-            radius = i * 60
-            painter.drawEllipse(center_x - radius, center_y - radius, 
-                              radius * 2, radius * 2)
+            radius = i * 200 * self.scale
+            painter.drawEllipse(
+                int(center_x - radius),
+                int(center_y - radius),
+                int(radius * 2),
+                int(radius * 2),
+            )
         
         # Dibujar líneas de azimut
+        max_range_px = 1000 * self.scale
         for angle in range(0, 360, 30):
             rad = math.radians(angle)
-            end_x = center_x + 300 * math.cos(rad)
-            end_y = center_y + 300 * math.sin(rad)
+            end_x = center_x + max_range_px * math.cos(rad)
+            end_y = center_y + max_range_px * math.sin(rad)
             painter.drawLine(center_x, center_y, int(end_x), int(end_y))
         
         # Dibujar detecciones
@@ -553,15 +626,21 @@ class RadarVisualizationWidget(QWidget):
                 continue
             
             # Calcular posición en pantalla (escalar coordenadas)
-            x = center_x + detection.x * 0.5
-            y = center_y + detection.y * 0.5
+            x = center_x + detection.x * self.scale
+            y = center_y + detection.y * self.scale
             
             # Color basado en el estado
             if detection.is_false_positive:
                 color = QColor(255, 100, 100, 150)  # Rojo semi-transparente
             else:
-                color = QColor(100, 255, 100, 200)  # Verde
-            
+                distance = math.hypot(detection.x, detection.y)
+                if (
+                    detection.speed >= self.speed_alert_threshold
+                    or distance >= self.distance_alert_threshold
+                ):
+                    color = QColor(255, 255, 0, 200)  # Amarillo (sospechoso)
+                else:
+                    color = QColor(100, 255, 100, 200)  # Verde (embarcación)
             # Tamaño basado en la edad (más reciente = más grande)
             size = max(3, 10 - int(age / 6))
             
@@ -580,6 +659,10 @@ class RadarVisualizationWidget(QWidget):
 
 class MainWindow(QMainWindow):
     """Ventana principal de la aplicación"""
+
+    # Señales para recibir datos desde otros hilos de manera segura
+    detections_signal = pyqtSignal(list)
+    connection_signal = pyqtSignal(bool)
     
     def __init__(self):
         super().__init__()
@@ -590,9 +673,15 @@ class MainWindow(QMainWindow):
         self.all_detections = []
         self.session_start_time = None
         self.last_update_time = None
-        
+
         self.setup_ui()
         self.setup_timer()
+
+        # Conectar señales para recibir datos desde hilos externos
+        self.detections_signal.connect(self.process_new_detections)
+        self.connection_signal.connect(self.update_connection_status)
+        
+        
         
     def setup_ui(self):
         self.setWindowTitle("Radar MAGOS - Sistema de Detección Marina")
@@ -736,6 +825,7 @@ class MainWindow(QMainWindow):
         tab_widget.addTab(viz_tab, "Visualización")
 
         return widget
+
 
     def create_detections_tab(self) -> QWidget:
         """Crea la pestaña de detecciones"""
@@ -897,19 +987,74 @@ class MainWindow(QMainWindow):
         self.trail_length_spin.setRange(10, 200)
         self.trail_length_spin.setValue(100)
         self.trail_length_spin.setSuffix(" detecciones")
+
+        self.speed_alert_spin = QDoubleSpinBox()
+        self.speed_alert_spin.setRange(0.1, 100.0)
+        self.speed_alert_spin.setValue(5.0)
+        self.speed_alert_spin.setSuffix(" m/s")
+
+        self.distance_alert_spin = QDoubleSpinBox()
+        self.distance_alert_spin.setRange(1.0, 1000.0)
+        self.distance_alert_spin.setValue(5.0)
+        self.distance_alert_spin.setSuffix(" m")
         
         controls_layout.addWidget(self.viz_enabled_cb)
         controls_layout.addWidget(self.show_false_positives_cb)
         controls_layout.addWidget(QLabel("Longitud de Rastro:"))
         controls_layout.addWidget(self.trail_length_spin)
+        controls_layout.addWidget(QLabel("Velocidad Sospechosa:"))
+        controls_layout.addWidget(self.speed_alert_spin)
+        controls_layout.addWidget(QLabel("Distancia Sospechosa:"))
+        controls_layout.addWidget(self.distance_alert_spin)
         controls_layout.addStretch()
         
         layout.addWidget(controls_group)
-        
+
+        # Controles de desplazamiento de la vista
+        pan_group = QGroupBox("Mover Vista")
+        pan_layout = QHBoxLayout(pan_group)
+        self.pan_up_btn = QToolButton()
+        self.pan_left_btn = QToolButton()
+        self.pan_right_btn = QToolButton()
+        self.pan_down_btn = QToolButton()
+
+        if PYQT_VERSION == 6:
+            self.pan_up_btn.setArrowType(Qt.ArrowType.UpArrow)
+            self.pan_left_btn.setArrowType(Qt.ArrowType.LeftArrow)
+            self.pan_right_btn.setArrowType(Qt.ArrowType.RightArrow)
+            self.pan_down_btn.setArrowType(Qt.ArrowType.DownArrow)
+        else:
+            self.pan_up_btn.setArrowType(Qt.UpArrow)
+            self.pan_left_btn.setArrowType(Qt.LeftArrow)
+            self.pan_right_btn.setArrowType(Qt.RightArrow)
+            self.pan_down_btn.setArrowType(Qt.DownArrow)
+
+        pan_layout.addWidget(self.pan_up_btn)
+        pan_layout.addWidget(self.pan_down_btn)
+        pan_layout.addWidget(self.pan_left_btn)
+        pan_layout.addWidget(self.pan_right_btn)
+        pan_layout.addStretch()
+
+        layout.addWidget(pan_group)
+
         # Widget de visualización
         self.radar_viz = RadarVisualizationWidget()
         layout.addWidget(self.radar_viz)
-        
+
+        # Conectar botones de desplazamiento
+        step = 50
+        self.pan_up_btn.clicked.connect(lambda: self.radar_viz.pan(0, -step))
+        self.pan_down_btn.clicked.connect(lambda: self.radar_viz.pan(0, step))
+        self.pan_left_btn.clicked.connect(lambda: self.radar_viz.pan(-step, 0))
+        self.pan_right_btn.clicked.connect(lambda: self.radar_viz.pan(step, 0))
+
+        # Actualizar umbrales de alerta cuando cambien
+        self.speed_alert_spin.valueChanged.connect(self.update_alert_thresholds)
+        self.distance_alert_spin.valueChanged.connect(self.update_alert_thresholds)
+
+        # Establecer umbrales iniciales
+        self.update_alert_thresholds()
+
         return widget
     
     def setup_timer(self):
@@ -1020,30 +1165,15 @@ class MainWindow(QMainWindow):
         """Inicia la recolección de datos"""
         if self.radar_api and not self.data_thread:
             self.data_thread = DataCollectionThread(self.radar_api)
-            self.data_thread.detections_received = self.detections_received
-            self.data_thread.connection_status = self.connection_status_signal
+            # Pasar las señales para que el hilo secundario envíe los datos
+            self.data_thread.detections_received = self.detections_signal
+            self.data_thread.connection_status = self.connection_signal
             
             # Configurar intervalo de actualización
             self.data_thread.update_interval = self.update_interval_spin.value()
             
             self.data_thread.start()
-    
-    def detections_received(self, detections: List[Detection]):
-        """Slot para PyQt - recibe nuevas detecciones"""
-        # Crear señal PyQt personalizada
-        class DetectionsSignal:
-            def emit(self, detections):
-                # Procesar detecciones en el hilo principal
-                self.process_new_detections(detections)
-        
-        signal = DetectionsSignal()
-        signal.process_new_detections = self.process_new_detections
-        signal.emit(detections)
-    
-    def connection_status_signal(self, is_connected: bool):
-        """Slot para PyQt - actualiza estado de conexión"""
-        self.update_connection_status(is_connected)
-    
+
     def process_new_detections(self, detections: List[Detection]):
         """Procesa nuevas detecciones recibidas"""
         if not detections:
