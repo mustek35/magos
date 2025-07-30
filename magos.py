@@ -1,6 +1,3 @@
-+241
--106
-
 import sys
 import json
 import requests
