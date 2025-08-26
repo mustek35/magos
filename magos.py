@@ -28,6 +28,11 @@ from websocket_client import WebSocketRadarClient
 # Debug flag controlled by environment variable or --debug argument
 DEBUG = os.environ.get("MAGOS_DEBUG") == "1"
 
+# Configuración del servidor Traccar
+TRACCAR_URL = "http://179.57.170.61:5055"
+TRACCAR_DEVICE_ID = "huelmo"
+TRACCAR_ALTITUDE = 10  # metros
+
 try:
     from PyQt6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, 
                                  QHBoxLayout, QWidget, QLineEdit, QPushButton,
@@ -298,6 +303,7 @@ class RadarAPI:
                     detection_data, timestamp, source_uid, self.pivot_lat, self.pivot_lng
                 )
                 new_detections.append(detection)
+                self._send_to_traccar(detection)
             
             # Agregar al buffer
             self.detections_buffer.extend(new_detections)
@@ -315,7 +321,31 @@ class RadarAPI:
             
         except Exception as e:
             print(f"Error procesando detecciones: {e}")
-    
+    def _send_to_traccar(self, detection: Detection) -> None:
+        """Envía una detección a un servidor Traccar"""
+        try:
+            R = 6378137  # radio terrestre en metros
+            lat = self.pivot_lat + (detection.y / R) * (180 / math.pi)
+            lon = self.pivot_lng + (detection.x / (R * math.cos(math.radians(self.pivot_lat)))) * (180 / math.pi)
+
+            params = {
+                "id": TRACCAR_DEVICE_ID,
+                "lat": f"{lat:.6f}",
+                "lon": f"{lon:.6f}",
+                "altitude": TRACCAR_ALTITUDE,
+                "accuracy": 0,
+                "speed": f"{detection.speed:.2f}",
+                "course": f"{detection.heading:.2f}",
+                "voltage": 0,
+                "batteryLevel": 0,
+                "timestamp": detection.timestamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "satellites": 0,
+            }
+            requests.get(TRACCAR_URL, params=params, timeout=5)
+        except Exception as e:
+            if DEBUG:
+                print(f"Error enviando a Traccar: {e}")
+
     def fetch_webclient_html(self) -> Optional[str]:
         """Obtiene HTML de webclient"""
         if not self.token:
