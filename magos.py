@@ -63,6 +63,7 @@ except ImportError:
         sys.exit(1)
 
 
+
 @dataclass
 class Detection:
     """Clase para representar una detección del radar"""
@@ -75,9 +76,17 @@ class Detection:
     confidence: float
     track_id: Optional[str] = None
     is_false_positive: bool = False
+    invalid_reason: Optional[str] = None
     
     @classmethod
-    def from_websocket_data(cls, detection_data: dict, timestamp: float, source_uid: str, pivot_lat: float = -41.664922, pivot_lng: float = -73.05338):
+    def from_websocket_data(
+        cls,
+        detection_data: dict,
+        timestamp: float,
+        source_uid: str,
+        pivot_lat: float = -41.664922,
+        pivot_lng: float = -73.05338,
+    ) -> "Detection":
         """Convierte datos del WebSocket MAGOS a Detection"""
         try:
             point = detection_data.get('point', {})
@@ -86,6 +95,7 @@ class Detection:
             # Coordenadas geográficas del radar
             lat = point.get('lat', 0.0)
             lng = point.get('lng', 0.0)
+            
             
             # Convertir a coordenadas cartesianas locales (metros)
             lat_diff = lat - pivot_lat
@@ -113,16 +123,20 @@ class Detection:
             if is_strong:
                 confidence = min(100.0, confidence * 1.2)
             
+            # Identificador único de la detección (y de la trayectoria)
+            uid = str(detection_data.get("uid", ""))
+
             return cls(
-                id=detection_data.get('uid', ''),
+                id=uid,
                 timestamp=datetime.fromtimestamp(timestamp),
                 x=x,
                 y=y,
                 speed=speed,
                 heading=heading,
                 confidence=confidence,
-                track_id=source_uid,
-                is_false_positive=False
+                track_id=uid or source_uid,
+                is_false_positive=False,
+                invalid_reason=None,
             )
             
         except Exception as e:
@@ -131,20 +145,22 @@ class Detection:
             return cls(
                 id=detection_data.get('uid', 'error'),
                 timestamp=datetime.fromtimestamp(timestamp),
-                x=0.0, y=0.0, speed=0.0, heading=0.0, confidence=0.0
+                x=0.0,
+                y=0.0,
+                speed=0.0,
+                heading=0.0,
+                confidence=0.0,
+                invalid_reason="conversion_error",
             )
 
 @dataclass
 class Track:
-    """Clase para representar una trayectoria"""
-    track_id: str
+    """Representa una trayectoria reconstruida en tiempo real"""
+    track_id: int
     detections: List[Detection]
     start_time: datetime
     last_update: datetime
-    speed: float
-    heading: float
-    distance_traveled: float
-    is_valid: bool = True
+    distance_traveled: float = 0.0
 
 # Encabezados de columnas para la tabla de detecciones y exportaciones
 DETECTION_HEADERS = [
@@ -156,8 +172,10 @@ DETECTION_HEADERS = [
     'Heading',
     'Confidence',
     'Track_ID',
-    'Is_False_Positive'
+    'Is_False_Positive',
+    'Reason'
 ]
+
 
 class RadarAPI:
     """Clase RadarAPI que FUNCIONA con WebSocket en tiempo real"""
@@ -341,37 +359,111 @@ class FalsePositiveFilter:
     """Filtro para eliminar falsos positivos"""
 
     def __init__(self):
-        self.min_track_duration = 3.0  # segundos
-        self.min_distance_traveled = 10.0  # metros
-        self.min_speed_threshold = 1.0  # m/s
+        # Criterios mínimos para considerar una trayectoria válida
+        self.min_track_duration = 5.0  # segundos
+        self.min_distance_traveled = 20.0  # metros
+        self.min_speed_threshold = 0.5  # m/s
+        self.min_detections = 5  # Número mínimo de detecciones por track
         self.max_stationary_time = 5.0  # segundos
         # Mantener historial de detecciones por track para calcular duraciones
         self.track_histories: Dict[str, List[Detection]] = {}
+        self.discard_log_path = os.environ.get("MAGOS_DISCARD_LOG") or (
+            "discarded_tracks.log" if DEBUG else None
+        )
+        
+class FalsePositiveFilter:
+    """Filtro para eliminar falsos positivos"""
+
+    def __init__(self):
+        # Criterios mínimos para considerar una trayectoria válida
+        self.min_track_duration = 5.0  # segundos
+        self.min_distance_traveled = 20.0  # metros
+        self.min_speed_threshold = 0.5  # m/s
+        self.min_detections = 5  # Número mínimo de detecciones por track
+        self.max_stationary_time = 5.0  # segundos
+
+        # Parámetros para reconstruir trayectorias sin depender de track_id
+        self.time_window = 5.0  # segundos entre detecciones consecutivas
+        self.distance_threshold = 15.0  # metros para agrupar puntos
+
+        # Lista de trayectorias activas
+        self.active_tracks: List[Track] = []
+        self.next_track_id = 1
+
+        self.discard_log_path = os.environ.get("MAGOS_DISCARD_LOG") or (
+            "discarded_tracks.log" if DEBUG else None
+        )
         
     def filter_detections(self, detections: List[Detection]) -> List[Detection]:
-        """Filtra falsos positivos basado en la trayectoria acumulada"""
-        valid_detections = []
+        """Reconstruye trayectorias en tiempo real y marca falsos positivos"""
+        results = []
 
-        for detection in detections:
-            track_id = detection.track_id or f"single_{detection.id}"
+        for detection in sorted(detections, key=lambda d: d.timestamp):
+            track = self._assign_track(detection)
 
-            history = self.track_histories.setdefault(track_id, [])
-            history.append(detection)
+            # Actualizar distancia recorrida
+            if len(track.detections) > 0:
+                last = track.detections[-1]
+                dist = math.hypot(detection.x - last.x, detection.y - last.y)
+                track.distance_traveled += dist
 
-            # Mantener solo los últimos 5 minutos de historial para cada track
-            cutoff = detection.timestamp - timedelta(minutes=5)
-            self.track_histories[track_id] = [d for d in history if d.timestamp >= cutoff]
+            track.detections.append(detection)
+            track.last_update = detection.timestamp
+            detection.track_id = str(track.track_id)
 
-            is_valid = self._is_valid_track(self.track_histories[track_id])
+            is_valid, reason = self._is_valid_track(track.detections)
             detection.is_false_positive = not is_valid
-            valid_detections.append(detection)
+            detection.invalid_reason = reason if not is_valid else None
 
-        return valid_detections
+            if not is_valid and self.discard_log_path:
+                try:
+                    with open(self.discard_log_path, "a", encoding="utf-8") as f:
+                        f.write(
+                            f"{detection.timestamp.isoformat()},"\
+                            f"{track.track_id},{reason}\n"
+                        )
+                except Exception:
+                    pass
+
+            results.append(detection)
+
+        self._cleanup_tracks()
+        return results
+
+    def _assign_track(self, detection: Detection) -> Track:
+        """Asigna la detección a una trayectoria existente o crea una nueva"""
+        for track in self.active_tracks:
+            last = track.detections[-1] if track.detections else None
+            if last:
+                dt = (detection.timestamp - last.timestamp).total_seconds()
+                if dt <= self.time_window:
+                    dist = math.hypot(detection.x - last.x, detection.y - last.y)
+                    if dist <= self.distance_threshold:
+                        return track
+
+        # Crear nueva trayectoria
+        new_track = Track(
+            track_id=self.next_track_id,
+            detections=[],
+            start_time=detection.timestamp,
+            last_update=detection.timestamp,
+        )
+        self.next_track_id += 1
+        self.active_tracks.append(new_track)
+        return new_track
+
+    def _cleanup_tracks(self):
+        """Elimina trayectorias inactivas"""
+        now = datetime.now()
+        self.active_tracks = [
+            t for t in self.active_tracks
+            if (now - t.last_update).total_seconds() <= self.time_window * 2
+        ]
     
-    def _is_valid_track(self, detections: List[Detection]) -> bool:
-        """Determina si una trayectoria es válida"""
-        if len(detections) < 2:
-            return False
+    def _is_valid_track(self, detections: List[Detection]) -> Tuple[bool, str]:
+        """Determina si una trayectoria es válida y devuelve el motivo si no lo es"""
+        if len(detections) < self.min_detections:
+            return False, "detecciones insuficientes"
 
         # Calcular duración total
         duration = (detections[-1].timestamp - detections[0].timestamp).total_seconds()
@@ -385,16 +477,31 @@ class FalsePositiveFilter:
 
         avg_speed = total_distance / duration if duration > 0 else 0.0
 
-        # Considerar válido si cumple cualquiera de los criterios principales
-        if duration >= self.min_track_duration:
-            return True
-        if total_distance >= self.min_distance_traveled:
-            return True
-        if avg_speed >= self.min_speed_threshold:
-            return True
+        # Calcular tiempo estacionario acumulado
+        stationary_time = 0.0
+        for i in range(1, len(detections)):
+            dx = detections[i].x - detections[i - 1].x
+            dy = detections[i].y - detections[i - 1].y
+            dist = math.hypot(dx, dy)
+            dt = (
+                detections[i].timestamp - detections[i - 1].timestamp
+            ).total_seconds()
 
-        return False
+            if dist < 1.0:
+                stationary_time += dt
+            else:
+                stationary_time = 0.0
+            if stationary_time > self.max_stationary_time:
+                return False, "sin movimiento"
 
+        if duration < self.min_track_duration:
+            return False, "duración insuficiente"
+        if total_distance < self.min_distance_traveled:
+            return False, "distancia insuficiente"
+        if avg_speed < self.min_speed_threshold:
+            return False, "velocidad baja"
+
+        return True, ""
 class DataCollectionThread:
     """Thread compatible con el código existente - USA WebSocket"""
     
@@ -481,7 +588,8 @@ class DetectionTableWidget(QTableWidget):
             QTableWidgetItem(f"{detection.heading:.1f}°"),
             QTableWidgetItem(f"{detection.confidence:.1f}%"),
             QTableWidgetItem(detection.track_id[:8] + "..." if detection.track_id else "N/A"),
-            QTableWidgetItem("Falso Positivo" if detection.is_false_positive else "Válida")
+            QTableWidgetItem("Falso Positivo" if detection.is_false_positive else "Válida"),
+            QTableWidgetItem(detection.invalid_reason or "")
         ]
         
         for col, item in enumerate(items):
@@ -513,6 +621,8 @@ class RadarVisualizationWidget(QWidget):
         self.speed_alert_threshold = 5.0  # m/s
         self.distance_alert_threshold = 5.0  # metros
         self.setMinimumSize(400, 400)
+        # Almacena las IDs de las detecciones con mayor distancia
+        self.farthest_ids = set()
         
     def add_detection(self, detection: Detection):
         """Añade una detección a la visualización"""
@@ -533,6 +643,25 @@ class RadarVisualizationWidget(QWidget):
         self.speed_alert_threshold = speed
         self.distance_alert_threshold = distance
         self.update()
+
+    def update_farthest_ids(self):
+        """Determina qué detecciones superar los umbrales y están más lejos"""
+        max_distance = -1.0
+        ids: set[str] = set()
+        current_time = datetime.now()
+        for det in self.detections:
+            # Ignorar detecciones muy antiguas
+            if (current_time - det.timestamp).total_seconds() > 60:
+                continue
+
+            distance = math.hypot(det.x, det.y)
+            if det.speed >= self.speed_alert_threshold or distance >= self.distance_alert_threshold:
+                if distance > max_distance:
+                    max_distance = distance
+                    ids = {det.id}
+                elif distance == max_distance:
+                    ids.add(det.id)
+        self.farthest_ids = ids
 
     def wheelEvent(self, event):
         """Permite hacer zoom con la rueda del mouse"""
@@ -606,6 +735,9 @@ class RadarVisualizationWidget(QWidget):
             end_y = center_y + max_range_px * math.sin(rad)
             painter.drawLine(center_x, center_y, int(end_x), int(end_y))
         
+        # Determinar las detecciones relevantes para seguimiento
+        self.update_farthest_ids()
+
         # Dibujar detecciones
         current_time = datetime.now()
         for detection in self.detections:
@@ -618,8 +750,10 @@ class RadarVisualizationWidget(QWidget):
             x = center_x + detection.x * self.scale
             y = center_y + detection.y * self.scale
             
-            # Color basado en el estado
-            if detection.is_false_positive:
+            # Color basado en el estado, resaltando los más lejanos
+            if detection.id in self.farthest_ids:
+                color = QColor(0, 200, 255, 200)  # Cian para mayor distancia
+            elif detection.is_false_positive:
                 color = QColor(255, 100, 100, 150)  # Rojo semi-transparente
             else:
                 distance = math.hypot(detection.x, detection.y)
@@ -636,7 +770,11 @@ class RadarVisualizationWidget(QWidget):
             painter.setBrush(QBrush(color))
             painter.setPen(QPen(color, 1))
             painter.drawEllipse(int(x - size), int(y - size), size * 2, size * 2)
-            
+
+            # Mostrar ID si es una de las detecciones más lejanas
+            if detection.id in self.farthest_ids:
+                painter.setPen(QPen(QColor(255, 255, 255)))
+                painter.drawText(int(x + size + 4), int(y - size - 4), detection.id)
             # Dibujar vector de velocidad
             if detection.speed > 0:
                 angle_rad = math.radians(detection.heading)
@@ -645,6 +783,7 @@ class RadarVisualizationWidget(QWidget):
                 
                 painter.setPen(QPen(color, 2))
                 painter.drawLine(int(x), int(y), int(vel_x), int(vel_y))
+
 
 class MainWindow(QMainWindow):
     """Ventana principal de la aplicación"""
@@ -660,6 +799,8 @@ class MainWindow(QMainWindow):
         self.ws_client = None
         self.false_positive_filter = FalsePositiveFilter()
         self.all_detections = []
+        self.csv_file = None
+        self.csv_writer = None
         self.session_start_time = None
         self.last_update_time = None
 
@@ -889,17 +1030,22 @@ class MainWindow(QMainWindow):
         self.min_speed_spin.setRange(0.1, 100.0)
         self.min_speed_spin.setValue(1.0)
         self.min_speed_spin.setSuffix(" m/s")
-        
+
+        self.min_detections_spin = QSpinBox()
+        self.min_detections_spin.setRange(1, 20)
+        self.min_detections_spin.setValue(5)
+        self.min_detections_spin.setSuffix(" det")
+
         self.max_stationary_spin = QDoubleSpinBox()
         self.max_stationary_spin.setRange(1.0, 60.0)
         self.max_stationary_spin.setValue(5.0)
         self.max_stationary_spin.setSuffix(" seg")
-        
+
         filter_layout.addRow("Duración Mínima de Track:", self.min_duration_spin)
         filter_layout.addRow("Distancia Mínima Recorrida:", self.min_distance_spin)
         filter_layout.addRow("Velocidad Mínima:", self.min_speed_spin)
+        filter_layout.addRow("Detecciones Mínimas:", self.min_detections_spin)
         filter_layout.addRow("Tiempo Máximo Estacionario:", self.max_stationary_spin)
-        
         # Botón para aplicar configuración
         apply_filters_btn = QPushButton("Aplicar Configuración")
         apply_filters_btn.clicked.connect(self.apply_filter_settings)
@@ -968,9 +1114,9 @@ class MainWindow(QMainWindow):
         
         self.viz_enabled_cb = QCheckBox("Habilitar Visualización")
         self.viz_enabled_cb.setChecked(True)
-        
+
         self.show_false_positives_cb = QCheckBox("Mostrar Falsos Positivos")
-        self.show_false_positives_cb.setChecked(True)
+        self.show_false_positives_cb.setChecked(False)
         
         self.trail_length_spin = QSpinBox()
         self.trail_length_spin.setRange(10, 200)
@@ -1083,7 +1229,7 @@ class MainWindow(QMainWindow):
         
         try:
             self.radar_api = RadarAPI(url, username, password)
-            
+
             if self.radar_api.authenticate():
                 self.connection_status.setStyleSheet("color: green; font-size: 16px;")
                 self.statusBar().showMessage("Conectado al radar MAGOS")
@@ -1093,9 +1239,12 @@ class MainWindow(QMainWindow):
                 
                 # Cargar vista web
                 self.load_web_view()
-                
+
                 # Iniciar recolección de datos
                 self.start_data_collection()
+
+                # Iniciar registro CSV
+                self.start_csv_logging()
                 
                 # Log
                 self.log_event("Conectado exitosamente al radar MAGOS")
@@ -1127,6 +1276,16 @@ class MainWindow(QMainWindow):
         if self.radar_api:
             self.radar_api.stop_websocket()
             self.radar_api = None
+
+        # Cerrar CSV
+        if self.csv_file:
+            try:
+                self.csv_file.close()
+            except Exception:
+                pass
+            self.csv_file = None
+            self.csv_writer = None
+
 
         self.connection_status.setStyleSheet("color: red; font-size: 16px;")
         self.statusBar().showMessage("Desconectado del radar")
@@ -1174,8 +1333,28 @@ class MainWindow(QMainWindow):
             
             # Configurar intervalo de actualización
             self.data_thread.update_interval = self.update_interval_spin.value()
-            
+
             self.data_thread.start()
+
+    def start_csv_logging(self):
+        """Crea un archivo CSV para registrar detecciones"""
+        import csv
+
+        if self.csv_file:
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"detections_{timestamp}.csv"
+        try:
+            self.csv_file = open(filename, "w", newline="", encoding="utf-8")
+            self.csv_writer = csv.writer(self.csv_file)
+            self.csv_writer.writerow(DETECTION_HEADERS)
+            if DEBUG:
+                self.log_event(f"Guardando detecciones en {filename}")
+        except Exception as e:
+            self.csv_file = None
+            self.csv_writer = None
+            print(f"Error creando archivo CSV: {e}")
 
     def process_new_detections(self, detections: List[Detection]):
         """Procesa nuevas detecciones recibidas"""
@@ -1216,7 +1395,26 @@ class MainWindow(QMainWindow):
         if filtered_detections and DEBUG:
             self.log_event(f"Procesadas {len(filtered_detections)} detecciones "
                           f"({valid_count} válidas, {false_positive_count} falsos positivos)")
-    
+
+        # Registrar en CSV
+        if self.csv_writer:
+            for d in filtered_detections:
+                row = [
+                    d.id,
+                    d.timestamp.isoformat(),
+                    d.x,
+                    d.y,
+                    d.speed,
+                    d.heading,
+                    d.confidence,
+                    d.track_id or '',
+                    d.is_false_positive,
+                ]
+                self.csv_writer.writerow(row)
+            try:
+                self.csv_file.flush()
+            except Exception:
+                pass
     def update_connection_status(self, is_connected: bool):
         """Actualiza el estado de conexión"""
         if is_connected:
@@ -1224,13 +1422,15 @@ class MainWindow(QMainWindow):
         else:
             self.connection_status.setStyleSheet("color: orange; font-size: 16px;")
     
+    
     def apply_filter_settings(self):
         """Aplica la nueva configuración de filtros"""
         self.false_positive_filter.min_track_duration = self.min_duration_spin.value()
         self.false_positive_filter.min_distance_traveled = self.min_distance_spin.value()
         self.false_positive_filter.min_speed_threshold = self.min_speed_spin.value()
+        self.false_positive_filter.min_detections = self.min_detections_spin.value()
         self.false_positive_filter.max_stationary_time = self.max_stationary_spin.value()
-        
+
         # Reconfigurar el hilo de datos si está activo
         if self.data_thread:
             self.data_thread.update_interval = self.update_interval_spin.value()
@@ -1299,18 +1499,20 @@ class ConfigurationManager:
                 "password": "magnolia"
             },
             "filters": {
-                "min_track_duration": 10.0,
-                "min_distance_traveled": 50.0,
-                "min_speed_threshold": 1.0,
+                "min_track_duration": 5.0,
+                "min_distance_traveled": 20.0,
+                "min_speed_threshold": 0.5,
+                "min_detections": 5,
                 "max_stationary_time": 5.0
             },
             "display": {
                 "auto_update": True,
                 "update_interval": 5,
-                "show_false_positives": True,
+                "show_false_positives": False,
                 "trail_length": 100
             }
         }
+    
     
     def load_config(self) -> dict:
         """Carga la configuración desde archivo"""
@@ -1370,7 +1572,8 @@ class ExportManager:
                         detection.heading,
                         detection.confidence,
                         detection.track_id or '',
-                        detection.is_false_positive
+                        detection.is_false_positive,
+                        detection.invalid_reason or ''
                     ]
                     writer.writerow(row)
                     
@@ -1394,7 +1597,8 @@ class ExportManager:
                     'heading': detection.heading,
                     'confidence': detection.confidence,
                     'track_id': detection.track_id,
-                    'is_false_positive': detection.is_false_positive
+                    'is_false_positive': detection.is_false_positive,
+                    'reason': detection.invalid_reason
                 })
             
             with open(filename, 'w', encoding='utf-8') as f:
@@ -1404,7 +1608,6 @@ class ExportManager:
         except Exception as e:
             print(f"Error exportando a JSON: {e}")
             return False
-
 
 def main():
     """Función principal"""
