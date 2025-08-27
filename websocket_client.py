@@ -2,6 +2,7 @@ import threading
 import time
 from typing import Callable, Optional
 
+import json
 import requests
 import websocket
 
@@ -28,6 +29,7 @@ class WebSocketRadarClient:
         self.session = requests.Session()
         self.ws = None
         self.thread = None
+        self.monitor_thread = None
         self.stop_event = threading.Event()
         self.reconnect_delay = reconnect_delay  # seconds
         self.ping_interval = ping_interval
@@ -53,11 +55,14 @@ class WebSocketRadarClient:
     def connect(self):
         """Start connection thread with automatic reconnection."""
         self.stop_event.clear()
-        if self.thread and self.thread.is_alive():
-            return
-        self.thread = threading.Thread(target=self._run)
-        self.thread.daemon = True
-        self.thread.start()
+        if not (self.thread and self.thread.is_alive()):
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+        if not (self.monitor_thread and self.monitor_thread.is_alive()):
+            self.monitor_thread = threading.Thread(
+                target=self._monitor, daemon=True
+            )
+            self.monitor_thread.start()
 
     def _create_ws_app(self, cookie_header: str) -> websocket.WebSocketApp:
         return websocket.WebSocketApp(
@@ -85,21 +90,56 @@ class WebSocketRadarClient:
                 if self.stop_event.wait(self.reconnect_delay):
                     break
 
+    def _monitor(self):
+        while not self.stop_event.is_set():
+            if not (self.thread and self.thread.is_alive()):
+                self.thread = threading.Thread(target=self._run, daemon=True)
+                self.thread.start()
+            if self.stop_event.wait(self.reconnect_delay):
+                break
+
     # WebSocket callbacks
     def on_message(self, ws, message):
-        print("\U0001f4e9 Mensaje recibido:")
-        print(message)
+        """Handle incoming WebSocket messages."""
+        try:
+            data = json.loads(message)
+        except json.JSONDecodeError:
+            data = None
+
+        if (
+            isinstance(data, list)
+            and len(data) >= 2
+            and data[0] == "API.Targets.UPD.Main"
+            and isinstance(data[1], list)
+        ):
+            for target in data[1]:
+                tail = target.get("tail", [])
+                if not tail:
+                    continue
+                point = tail[-1]
+                simplified = {
+                    "id": target.get("uid"),
+                    "lat": point.get("lat"),
+                    "lon": point.get("lng"),
+                    "altitude": point.get("alt", 0),
+                    "speed": target.get("speed", 0),
+                    "accuracy": 0,
+                    "course": 0,
+                    "timestamp": int(time.time()),
+                }
+                print(json.dumps(simplified))
+
         if self.message_handler:
             self.message_handler(message)
 
     def on_error(self, ws, error):
-        print("\u274c Error:", error)
+        print("❌ Error:", error)
 
     def on_close(self, ws, close_status_code, close_msg):
-        print("\ud83d\udd12 Conexi\u00f3n cerrada")
+        print("🔒 Conexión cerrada")
 
     def on_open(self, ws):
-        print("\ud83d\udd13 Conexi\u00f3n WebSocket abierta")
+        print("🔓 Conexión WebSocket abierta")
 
     def close(self):
         self.stop_event.set()
@@ -111,4 +151,7 @@ class WebSocketRadarClient:
         if self.thread and self.thread.is_alive():
             self.thread.join()
         self.thread = None
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            self.monitor_thread.join()
+        self.monitor_thread = None
 
