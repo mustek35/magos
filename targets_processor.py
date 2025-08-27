@@ -31,13 +31,33 @@ WS_URL = "wss://example.com/ws"
 USERNAME = "user"
 PASSWORD = "pass"
 
-TRACCAR_URL = "https://traccar.example.com/api/positions"
-AUTH = ("traccar_user", "traccar_pass")
-DEVICE_MAP: Dict[str, int] = {
-    # "uid": deviceId
+TRACCAR_HTTP_URL = "http://179.57.170.61:5055"
+DEVICE_MAP: Dict[str, str] = {
+    # "uid": "device_id"
+}
+
+# Optional mapping for zone alarms: zone name -> {device_id?, lat, lon, alt}
+# If ``device_id`` is omitted, the script uses the center name extracted from the
+# alarm (e.g., ``Alarm_Huelmo_M`` -> ``Huelmo``) as the Traccar device id.
+ZONE_MAP: Dict[str, Dict[str, float | str]] = {
+    # Example: "Alarm_Huelmo_M": {
+    #     "lat": -41.6659,
+    #     "lon": -73.0527,
+    #     "alt": 0,
+    #     # optional: "device_id": "Huelmo",
+    # }
 }
 
 CSV_FILE = "detections.csv"
+ALARM_FILE = "alarms.csv"
+
+
+def obtener_nombre_centro(nombre: str) -> str | None:
+    """Extrae el nombre del centro desde el identificador de alarma."""
+    partes = nombre.split("_")
+    if len(partes) >= 2:
+        return partes[1]
+    return None
 
 # ---------------------------------------------------------------------------
 # Helpers for tail accumulation and output
@@ -77,27 +97,71 @@ def registrar_deteccion(uid: str, target: dict, point: dict) -> None:
             ]
         )
 
-def enviar_a_traccar(uid: str, target: dict, point: dict) -> None:
-    """Send a position update to Traccar."""
-    device_id = DEVICE_MAP.get(uid)
-    if device_id is None:
-        return
-    data = {
-        "deviceId": device_id,
-        "latitude": point["lat"],
-        "longitude": point["lng"],
-        "altitude": point["alt"],
-        "speed": target.get("speed"),
-        "attributes": {
-            "distance": target.get("distance"),
-            "conf": target.get("conf"),
-        },
-        "deviceTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+
+def registrar_alarma(alarm: dict) -> None:
+    """Store zone alarm information in a CSV file."""
+    file_exists = os.path.exists(ALARM_FILE)
+    with open(ALARM_FILE, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["timestamp", "uid", "name", "alarmClass", "isAlarmed"])
+        writer.writerow(
+            [
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                alarm.get("uid"),
+                alarm.get("name"),
+                alarm.get("alarmClass"),
+                alarm.get("isAlarmed"),
+            ]
+        )
+
+def enviar_a_traccar(
+    device_id: str,
+    lat: float,
+    lon: float,
+    alt: float = 0.0,
+    speed: float = 0.0,
+    accuracy: float = 10.0,
+    course: float = 0.0,
+    voltage: float | None = None,
+    battery_level: float | None = None,
+    satellites: int | None = None,
+) -> None:
+    """Send a position update to Traccar using the HTTP protocol."""
+    params = {
+        "id": device_id,
+        "lat": lat,
+        "lon": lon,
+        "altitude": alt,
+        "speed": speed,
+        "accuracy": accuracy,
+        "course": course,
+        "timestamp": int(time.time()),
     }
+    if voltage is not None:
+        params["voltage"] = voltage
+    if battery_level is not None:
+        params["batteryLevel"] = f"{battery_level:.2f}"
+    if satellites is not None:
+        params["satellites"] = satellites
     try:
-        requests.post(TRACCAR_URL, json=data, auth=AUTH, timeout=5)
+        requests.get(TRACCAR_HTTP_URL, params=params, timeout=5)
     except requests.RequestException as exc:
         print("Error enviando a Traccar:", exc)
+
+
+def enviar_target_a_traccar(uid: str, target: dict, point: dict) -> None:
+    """Send a target position to Traccar if a device mapping exists."""
+    device_id = DEVICE_MAP.get(uid)
+    if not device_id:
+        return
+    enviar_a_traccar(
+        device_id,
+        point.get("lat"),
+        point.get("lng"),
+        point.get("alt", 0.0),
+        speed=target.get("speed", 0.0),
+    )
 
 def handle_targets_update(targets: List[dict]) -> None:
     """Process a list of target dictionaries."""
@@ -116,7 +180,21 @@ def handle_targets_update(targets: List[dict]) -> None:
             ):
                 last_tail.append(p)
                 registrar_deteccion(uid, t, p)
-                enviar_a_traccar(uid, t, p)
+                enviar_target_a_traccar(uid, t, p)
+
+
+def handle_zone_alarm(alarm: dict) -> None:
+    """Process zone alarm messages."""
+    registrar_alarma(alarm)
+    name = alarm.get("name")
+    info = ZONE_MAP.get(name, {})
+    if alarm.get("isAlarmed") and name:
+        device_id = info.get("device_id") or obtener_nombre_centro(name)
+        lat = info.get("lat")
+        lon = info.get("lon")
+        alt = info.get("alt", 0.0)
+        if device_id and lat is not None and lon is not None:
+            enviar_a_traccar(device_id, lat, lon, alt)
 
 def handle_message(message: str) -> None:
     """WebSocket message handler."""
@@ -131,6 +209,13 @@ def handle_message(message: str) -> None:
         and isinstance(data[1], list)
     ):
         handle_targets_update(data[1])
+    elif (
+        isinstance(data, list)
+        and len(data) >= 2
+        and data[0] == "API.Zone.UPD.Alarm"
+        and isinstance(data[1], dict)
+    ):
+        handle_zone_alarm(data[1])
 
 # ---------------------------------------------------------------------------
 # Entrypoint
