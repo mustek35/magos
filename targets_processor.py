@@ -20,6 +20,7 @@ from collections import defaultdict
 from typing import Dict, List
 
 import requests
+import websocket
 
 from websocket_client import WebSocketRadarClient
 
@@ -32,6 +33,8 @@ USERNAME = "user"
 PASSWORD = "pass"
 
 TRACCAR_HTTP_URL = "http://179.57.170.61:5055"
+# WebSocket endpoint for the React map
+MAP_WS_URL = "ws://localhost:9000"
 DEVICE_MAP: Dict[str, str] = {
     # "uid": "device_id"
 }
@@ -115,6 +118,8 @@ def registrar_alarma(alarm: dict) -> None:
             ]
         )
 
+map_ws = None
+
 def enviar_a_traccar(
     device_id: str,
     lat: float,
@@ -163,6 +168,18 @@ def enviar_target_a_traccar(uid: str, target: dict, point: dict) -> None:
         speed=target.get("speed", 0.0),
     )
 
+
+def enviar_a_mapa(data: dict) -> None:
+    """Send a position update to the WebSocket map."""
+    global map_ws
+    try:
+        if map_ws is None:
+            map_ws = websocket.create_connection(MAP_WS_URL, timeout=5)
+        map_ws.send(json.dumps(data))
+    except Exception as exc:
+        print("Error enviando a mapa:", exc)
+        map_ws = None
+
 def handle_targets_update(targets: List[dict]) -> None:
     """Process a list of target dictionaries."""
     for t in targets:
@@ -180,7 +197,13 @@ def handle_targets_update(targets: List[dict]) -> None:
             ):
                 last_tail.append(p)
                 registrar_deteccion(uid, t, p)
-                enviar_target_a_traccar(uid, t, p)
+                device = DEVICE_MAP.get(uid, uid)
+                enviar_a_mapa({
+                    "id": device,
+                    "lat": p.get("lat"),
+                    "lon": p.get("lng"),
+                    "speed": t.get("speed", 0.0),
+                })
 
 
 def handle_zone_alarm(alarm: dict) -> None:
@@ -194,7 +217,12 @@ def handle_zone_alarm(alarm: dict) -> None:
         lon = info.get("lon")
         alt = info.get("alt", 0.0)
         if device_id and lat is not None and lon is not None:
-            enviar_a_traccar(device_id, lat, lon, alt)
+            enviar_a_mapa({
+                "id": device_id,
+                "lat": lat,
+                "lon": lon,
+                "speed": 0.0,
+            })
 
 def handle_message(message: str) -> None:
     """WebSocket message handler."""
