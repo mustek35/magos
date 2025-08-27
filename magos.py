@@ -284,7 +284,9 @@ class RadarAPI:
                 ws_url=ws_url,
                 username=self.username,
                 password=self.password,
-                message_handler=message_handler
+                message_handler=message_handler,
+                ping_interval=25,
+                ping_timeout=60,
             )
             
             self.ws_client.connect()
