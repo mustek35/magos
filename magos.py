@@ -76,6 +76,8 @@ class Detection:
     timestamp: datetime
     x: float
     y: float
+    lat: float
+    lng: float
     speed: float
     heading: float
     confidence: float
@@ -96,12 +98,12 @@ class Detection:
         try:
             point = detection_data.get('point', {})
             hypo = detection_data.get('hypo', {})
-            
+
             # Coordenadas geográficas del radar
             lat = point.get('lat', 0.0)
             lng = point.get('lng', 0.0)
-            
-            
+
+
             # Convertir a coordenadas cartesianas locales (metros)
             lat_diff = lat - pivot_lat
             lng_diff = lng - pivot_lng
@@ -136,6 +138,8 @@ class Detection:
                 timestamp=datetime.fromtimestamp(timestamp),
                 x=x,
                 y=y,
+                lat=lat,
+                lng=lng,
                 speed=speed,
                 heading=heading,
                 confidence=confidence,
@@ -152,6 +156,8 @@ class Detection:
                 timestamp=datetime.fromtimestamp(timestamp),
                 x=0.0,
                 y=0.0,
+                lat=0.0,
+                lng=0.0,
                 speed=0.0,
                 heading=0.0,
                 confidence=0.0,
@@ -295,12 +301,18 @@ class RadarAPI:
             timestamp = payload.get('timestamp', time.time())
             source_uid = payload.get('srcUid', '')
             detections_data = payload.get('detections', [])
-            
+
+            pivot = payload.get('PIVOT', {})
+            pivot_lat = pivot.get('lat', self.pivot_lat)
+            pivot_lng = pivot.get('lng', self.pivot_lng)
+            self.pivot_lat = pivot_lat
+            self.pivot_lng = pivot_lng
+
             # Convertir a objetos Detection
             new_detections = []
             for detection_data in detections_data:
                 detection = Detection.from_websocket_data(
-                    detection_data, timestamp, source_uid, self.pivot_lat, self.pivot_lng
+                    detection_data, timestamp, source_uid, pivot_lat, pivot_lng
                 )
                 new_detections.append(detection)
                 self._send_to_traccar(detection)
@@ -324,14 +336,10 @@ class RadarAPI:
     def _send_to_traccar(self, detection: Detection) -> None:
         """Envía una detección a un servidor Traccar"""
         try:
-            R = 6378137  # radio terrestre en metros
-            lat = self.pivot_lat + (detection.y / R) * (180 / math.pi)
-            lon = self.pivot_lng + (detection.x / (R * math.cos(math.radians(self.pivot_lat)))) * (180 / math.pi)
-
             params = {
                 "id": TRACCAR_DEVICE_ID,
-                "lat": f"{lat:.6f}",
-                "lon": f"{lon:.6f}",
+                "lat": f"{detection.lat:.6f}",
+                "lon": f"{detection.lng:.6f}",
                 "altitude": TRACCAR_ALTITUDE,
                 "accuracy": 0,
                 "speed": f"{detection.speed:.2f}",
