@@ -1,5 +1,6 @@
 import threading
 import time
+import json
 from typing import Callable, Optional
 
 import requests
@@ -16,7 +17,9 @@ class WebSocketRadarClient:
         username: str,
         password: str,
         message_handler: Optional[Callable[[str], None]] = None,
-        reconnect_delay: int = 5,
+        reconnect_delay: int = 1,
+        ping_interval: int = 5,
+        ping_timeout: int = 2,
     ) -> None:
         self.login_url = login_url
         self.ws_url = ws_url
@@ -28,6 +31,8 @@ class WebSocketRadarClient:
         self.thread = None
         self.stop_event = threading.Event()
         self.reconnect_delay = reconnect_delay  # seconds
+        self.ping_interval = ping_interval
+        self.ping_timeout = ping_timeout
 
     # ---------------------------
     # 1. Login with requests
@@ -70,9 +75,12 @@ class WebSocketRadarClient:
             try:
                 cookie_header = self.login()
                 self.ws = self._create_ws_app(cookie_header)
-                self.ws.run_forever(ping_interval=30, ping_timeout=10)
+                self.ws.run_forever(
+                    ping_interval=self.ping_interval,
+                    ping_timeout=self.ping_timeout,
+                )
             except Exception as e:
-                print("❌ Error WebSocket:", e)
+                print(f"❌ Error WebSocket: {e!r}")
             if not self.stop_event.is_set():
                 print(f"🔄 Reintentando conexión en {self.reconnect_delay} segundos...")
                 if self.stop_event.wait(self.reconnect_delay):
@@ -80,13 +88,19 @@ class WebSocketRadarClient:
 
     # WebSocket callbacks
     def on_message(self, ws, message):
-        print("\U0001f4e9 Mensaje recibido:")
-        print(message)
+        event = ""
+        try:
+            data = json.loads(message)
+            if isinstance(data, list) and data:
+                event = str(data[0])
+        except Exception:
+            event = "<invalid>"
+        print(f"\U0001f4e9 Mensaje {event}")
         if self.message_handler:
             self.message_handler(message)
 
     def on_error(self, ws, error):
-        print("\u274c Error:", error)
+        print(f"\u274c Error: {error!r}")
 
     def on_close(self, ws, close_status_code, close_msg):
         print("\ud83d\udd12 Conexi\u00f3n cerrada")
