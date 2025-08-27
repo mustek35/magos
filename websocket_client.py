@@ -1,4 +1,5 @@
 import threading
+import time
 from typing import Callable, Optional
 
 import requests
@@ -15,6 +16,7 @@ class WebSocketRadarClient:
         username: str,
         password: str,
         message_handler: Optional[Callable[[str], None]] = None,
+        reconnect_delay: int = 5,
     ) -> None:
         self.login_url = login_url
         self.ws_url = ws_url
@@ -24,6 +26,8 @@ class WebSocketRadarClient:
         self.session = requests.Session()
         self.ws = None
         self.thread = None
+        self.stop_event = threading.Event()
+        self.reconnect_delay = reconnect_delay  # seconds
 
     # ---------------------------
     # 1. Login with requests
@@ -43,8 +47,16 @@ class WebSocketRadarClient:
     # 2. Connect to WebSocket
     # ---------------------------
     def connect(self):
-        cookie_header = self.login()
-        self.ws = websocket.WebSocketApp(
+        """Start connection thread with automatic reconnection."""
+        self.stop_event.clear()
+        if self.thread and self.thread.is_alive():
+            return
+        self.thread = threading.Thread(target=self._run)
+        self.thread.daemon = True
+        self.thread.start()
+
+    def _create_ws_app(self, cookie_header: str) -> websocket.WebSocketApp:
+        return websocket.WebSocketApp(
             self.ws_url,
             header={"Cookie": cookie_header},
             on_open=self.on_open,
@@ -52,9 +64,19 @@ class WebSocketRadarClient:
             on_error=self.on_error,
             on_close=self.on_close,
         )
-        self.thread = threading.Thread(target=self.ws.run_forever)
-        self.thread.daemon = True
-        self.thread.start()
+
+    def _run(self):
+        while not self.stop_event.is_set():
+            try:
+                cookie_header = self.login()
+                self.ws = self._create_ws_app(cookie_header)
+                self.ws.run_forever(ping_interval=30, ping_timeout=10)
+            except Exception as e:
+                print("❌ Error WebSocket:", e)
+            if not self.stop_event.is_set():
+                print(f"🔄 Reintentando conexión en {self.reconnect_delay} segundos...")
+                if self.stop_event.wait(self.reconnect_delay):
+                    break
 
     # WebSocket callbacks
     def on_message(self, ws, message):
@@ -73,8 +95,13 @@ class WebSocketRadarClient:
         print("\ud83d\udd13 Conexi\u00f3n WebSocket abierta")
 
     def close(self):
+        self.stop_event.set()
         if self.ws:
-            self.ws.close()
+            try:
+                self.ws.close()
+            except Exception:
+                pass
         if self.thread and self.thread.is_alive():
             self.thread.join()
+        self.thread = None
 
