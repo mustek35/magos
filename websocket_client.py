@@ -17,6 +17,8 @@ class WebSocketRadarClient:
         password: str,
         message_handler: Optional[Callable[[str], None]] = None,
         reconnect_delay: int = 5,
+        ping_interval: int = 5,
+        ping_timeout: int = 2,
     ) -> None:
         self.login_url = login_url
         self.ws_url = ws_url
@@ -28,6 +30,8 @@ class WebSocketRadarClient:
         self.thread = None
         self.stop_event = threading.Event()
         self.reconnect_delay = reconnect_delay  # seconds
+        self.ping_interval = ping_interval
+        self.ping_timeout = ping_timeout
 
     # ---------------------------
     # 1. Login with requests
@@ -70,7 +74,10 @@ class WebSocketRadarClient:
             try:
                 cookie_header = self.login()
                 self.ws = self._create_ws_app(cookie_header)
-                self.ws.run_forever(ping_interval=30, ping_timeout=10)
+                self.ws.run_forever(
+                    ping_interval=self.ping_interval,
+                    ping_timeout=self.ping_timeout,
+                )
             except Exception as e:
                 print("❌ Error WebSocket:", e)
             if not self.stop_event.is_set():
