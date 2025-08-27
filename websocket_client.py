@@ -2,6 +2,7 @@ import threading
 import time
 from typing import Callable, Optional
 
+import json
 import requests
 import websocket
 
@@ -87,8 +88,35 @@ class WebSocketRadarClient:
 
     # WebSocket callbacks
     def on_message(self, ws, message):
-        print("\U0001f4e9 Mensaje recibido:")
-        print(message)
+        """Handle incoming WebSocket messages."""
+        try:
+            data = json.loads(message)
+        except json.JSONDecodeError:
+            data = None
+
+        if (
+            isinstance(data, list)
+            and len(data) >= 2
+            and data[0] == "API.Targets.UPD.Main"
+            and isinstance(data[1], list)
+        ):
+            for target in data[1]:
+                tail = target.get("tail", [])
+                if not tail:
+                    continue
+                point = tail[-1]
+                simplified = {
+                    "id": target.get("uid"),
+                    "lat": point.get("lat"),
+                    "lon": point.get("lng"),
+                    "altitude": point.get("alt", 0),
+                    "speed": target.get("speed", 0),
+                    "accuracy": 0,
+                    "course": 0,
+                    "timestamp": int(time.time()),
+                }
+                print(json.dumps(simplified))
+
         if self.message_handler:
             self.message_handler(message)
 
